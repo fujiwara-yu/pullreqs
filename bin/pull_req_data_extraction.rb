@@ -141,6 +141,7 @@ Extract data for pull requests for a given repository
   def check_merged
     log "Check merged method run"
     interrupted = false
+    @ghtoken = self.config['ghtoken']
 
     trap('INT') {
       log "#{File.basename($0)}(#{Process.pid}): Received SIGINT, exiting"
@@ -157,12 +158,23 @@ Extract data for pull requests for a given repository
       Trollop::die "Cannot find user #{owner}"
     end
 
-    repo_entry = db.from(:projects, :users).\
-                  where(:users__id => :projects__owner_id).\
-                  where(:users__login => owner).\
-                  where(:projects__name => repo).\
-                  select(:projects__id, :projects__language).\
-                  first
+ q = <<-QUERY
+    SELECT p.id, p.language 
+    FROM projects p, users u
+    WHERE u.id = p.owner_id
+      AND u.login = ? 
+      AND p.name = ?
+    QUERY
+
+
+    repo_entry = db.fetch(q, owner, repo).first
+
+   # repo_entry = db.from(:projects, :users).\
+    #              where(:users__id => :projects__owner_id).\
+     #             where(:users__login => owner).\
+     #             where(:projects__name => repo).\
+     #             select(:projects__id, :projects__language).\
+     #             first
 
     if repo_entry.nil?
       Trollop::die "Cannot find repository #{owner}/#{repo}"
@@ -229,6 +241,7 @@ Extract data for pull requests for a given repository
         r = {:pull_req_id => pr[:id], :github_id => pr[:github_id],
              :merged_using => close_reason[pr[:github_id]],
              :requester => requester(pr)}
+
         # log r
         r
       rescue StandardError => e
@@ -253,6 +266,8 @@ Extract data for pull requests for a given repository
 
   # Main command code
   def go
+    @ghtoken = self.config['ghtoken']
+
     interrupted = false
 
     trap('INT') {
@@ -265,17 +280,27 @@ Extract data for pull requests for a given repository
     self.token = ARGV[2]
 
     user_entry = db.from(:users).where(:login => owner).select(:login).first
-
+    
     if user_entry.nil?
       Trollop::die "Cannot find user #{owner}"
     end
 
-    repo_entry = db.from(:projects, :users).\
-                  where(:users__id => :projects__owner_id).\
-                  where(:users__login => owner).\
-                  where(:projects__name => repo).\
-                  select(:projects__id, :projects__language).\
-                  first
+   q = <<-QUERY
+    SELECT p.id, p.language 
+    FROM projects p, users u
+    WHERE u.id = p.owner_id
+      AND u.login = ? 
+      AND p.name = ?
+    QUERY
+    
+    repo_entry = db.fetch(q, owner, repo).first
+
+   # repo_entry = db.from(:projects, :users).\
+   #               where(:users__id => :projects__owner_id).\
+   #               where(:users__login => owner).\
+   #               where(:projects__name => repo).\
+   #               select(:projects__id, :projects__language).\
+   #               first
 
     if repo_entry.nil?
       Trollop::die "Cannot find repository #{owner}/#{repo}"
@@ -304,6 +329,7 @@ Extract data for pull requests for a given repository
     end
     log "#{all_commits.size} commits to process"
 
+    # pull_reqs の第2引数に github_id を指定して1つだけ結果を取り出せる．
     self.prs = pull_reqs(repo_entry).sort_by! { |pr| pr[:github_id]}
 
     # Process pull request list
@@ -315,7 +341,7 @@ Extract data for pull requests for a given repository
       rescue StandardError => e
         log "Error processing pull_request #{pr[:github_id]}: #{e.message}"
         log e.backtrace
-        #raise e
+       # raise e
       end
     end
 
@@ -398,11 +424,11 @@ Extract data for pull requests for a given repository
         :lines_modified_open      => stats_open[:lines_added] + stats_open[:lines_deleted],
         :files_modified_open      => stats_open[:files_touched],
         :commits_on_files_touched => commits_on_files_touched(pr, months_back),
-        :blanch_hotness           => commits_incl_prs,
-        :blanch_commtis           => num_of_commits,
+        :branch_hotness           => commits_incl_prs,
+        :branch_commtis           => num_of_commits,
 
         # post-experiment
-        # :branch                   => pull_req_entry(pr)['base']['ref'],
+         :branch                   => pull_req_entry(pr)['base']['ref'],
         # :closed_at                => Time.at(pr[:closed_at]).to_i
     }
   end
@@ -470,6 +496,7 @@ Extract data for pull requests for a given repository
         {:projection => {'body' => 1, 'created_at' => 1, '_id' => 0},
          :sort => {'created_at' => 1}}
     ).map { |x| x }
+
 
     comments.reverse.take(3).map { |x| x['body'] }.uniq.each do |last|
       # 3. Last comment contains a commit number
@@ -550,7 +577,7 @@ Extract data for pull requests for a given repository
     QUERY
     begin
       pullreq = pull_req_entry(pr)
-      db.fetch(q, pr[:id], pullreq[:created_at]).first[:commit_count]
+      db.fetch(q, pr[:id], pullreq['created_at']).first[:commit_count]
     rescue
       -1
     end
@@ -1347,6 +1374,8 @@ Extract data for pull requests for a given repository
     end
     activity = 0
     size = 0
+
+  　# fujiwara-note date_of_commit '' or : ??
     db.fetch(q, pr[:id]).all.each do |c|
       activity += 1.0 - (Time.at(pr[:created_at]).to_i -
                          c[:date_of_commit].to_i) /
@@ -1360,7 +1389,8 @@ Extract data for pull requests for a given repository
 
     oldest = Time.at(Time.at(pr[:created_at]).to_i - 3600 * 24 * 30 * months_back)
     pr_against = pull_req_entry(pr)['base']['sha']
-
+ 
+    # githbu_id 2285等で onbject not found - no match for id のエラー
     walker = Rugged::Walker.new(git)
     walker.sorting(Rugged::SORT_DATE)
     walker.push(pr_against)
@@ -1473,9 +1503,10 @@ Extract data for pull requests for a given repository
         and c.created_at <= ?
         and pr.id = ?
       QUERY
-
+      
       pullreq = pull_req_entry(pr)
-      commits = db.fetch(q, pullreq[:created_at], pr[:id]).all
+
+      commits = db.fetch(q, pullreq['created_at'], pr[:id]).all
     else
       q = <<-QUERY
         select c.sha as sha
@@ -1484,7 +1515,6 @@ Extract data for pull requests for a given repository
         and prc.commit_id = c.id
         and pr.id = ?
       QUERY
-
       commits = db.fetch(q, pr[:id]).all
     end
 
@@ -1497,7 +1527,13 @@ Extract data for pull requests for a given repository
 
       acc << a unless a.nil?
       acc
-    }.select{|c| c['parents'].size <= 1}
+    }.select{|c|
+      if c['parents'].nil? 
+        c['parents'] != nil
+      else
+        c['parents'].size <= 1
+      end
+    }
   end
 
   # Returns all comments for the issue sorted by creation date ascending
@@ -1616,7 +1652,8 @@ Extract data for pull requests for a given repository
 
     contents = nil
     begin
-      r = open(url, 'User-Agent' => 'emi0910', 'Authorization' => "token #{token}")
+      r = open(url, 'User-Agent' => 'fujiwara-yu',
+               'Authorization' => "token #{@ghtoken}")
       @remaining = r.meta['x-ratelimit-remaining'].to_i
       @reset = r.meta['x-ratelimit-reset'].to_i
       contents = r.read
@@ -1685,7 +1722,13 @@ Extract data for pull requests for a given repository
   def test_case_filter
     raise Exception.new("Unimplemented")
   end
-
+ q = <<-QUERY
+    SELECT p.id, p.language 
+    FROM projects p, users u
+    WHERE u.id = p.owner_id
+      AND u.login = ? 
+      AND p.name = ?
+    QUERY
   # Return a f: buff -> Boolean, that determines whether a
   # line represents an assertion
   def assertion_filter
